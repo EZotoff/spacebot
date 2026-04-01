@@ -617,6 +617,7 @@ pub struct DefaultsConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
+    pub participant_context: ParticipantContextConfig,
     pub browser: BrowserConfig,
     pub channel: ChannelConfig,
     pub mcp: Vec<McpServerConfig>,
@@ -653,6 +654,7 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("ingestion", &self.ingestion)
             .field("cortex", &self.cortex)
             .field("warmup", &self.warmup)
+            .field("participant_context", &self.participant_context)
             .field("browser", &self.browser)
             .field("channel", &self.channel)
             .field("mcp", &self.mcp)
@@ -800,6 +802,38 @@ impl Default for WorkingMemoryConfig {
             persistence_message_threshold: 20,
             persistence_time_threshold_secs: 900,
             persistence_event_density_threshold: 5,
+        }
+    }
+}
+
+/// Participant context configuration.
+///
+/// Keeps the prompt-facing participant-awareness surface separate from working
+/// memory so the future humans/user-identity pipeline can evolve behind a
+/// stable boundary.
+#[derive(Debug, Clone, Copy)]
+pub struct ParticipantContextConfig {
+    /// Whether participant context injection is enabled.
+    pub enabled: bool,
+    /// Minimum active participants required before the section appears.
+    ///
+    /// Defaults to 1 for the current config-backed implementation so DMs still
+    /// benefit from participant metadata. The fuller participant-awareness
+    /// pipeline can raise this later if needed.
+    pub min_participants: usize,
+    /// Token budget for the participant context section.
+    pub token_budget: usize,
+    /// Maximum participants to render in the prompt.
+    pub max_participants: usize,
+}
+
+impl Default for ParticipantContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_participants: 1,
+            token_budget: 400,
+            max_participants: 5,
         }
     }
 }
@@ -1374,6 +1408,7 @@ impl Default for DefaultsConfig {
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
             warmup: WarmupConfig::default(),
+            participant_context: ParticipantContextConfig::default(),
             browser: BrowserConfig::default(),
             channel: ChannelConfig::default(),
             mcp: Vec::new(),
