@@ -82,6 +82,55 @@ fn should_flush_coalesce_buffer_for_event(event: &ProcessEvent) -> bool {
     )
 }
 
+fn classify_conversational_event_summary(
+    summary: &str,
+    default_event_type: crate::memory::WorkingMemoryEventType,
+) -> (crate::memory::WorkingMemoryEventType, String) {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return (default_event_type, String::new());
+    }
+
+    if let Some((prefix, rest)) = trimmed.split_once(':') {
+        let rest_trimmed = rest.trim();
+        match prefix.trim().to_ascii_lowercase().as_str() {
+            "outcome" => {
+                return (
+                    crate::memory::WorkingMemoryEventType::Outcome,
+                    if rest_trimmed.is_empty() {
+                        trimmed.to_string()
+                    } else {
+                        rest_trimmed.to_string()
+                    },
+                );
+            }
+            "blocked_on" => {
+                return (
+                    crate::memory::WorkingMemoryEventType::BlockedOn,
+                    if rest_trimmed.is_empty() {
+                        trimmed.to_string()
+                    } else {
+                        rest_trimmed.to_string()
+                    },
+                );
+            }
+            "constraint" => {
+                return (
+                    crate::memory::WorkingMemoryEventType::Constraint,
+                    if rest_trimmed.is_empty() {
+                        trimmed.to_string()
+                    } else {
+                        rest_trimmed.to_string()
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+
+    (default_event_type, trimmed.to_string())
+}
+
 /// Shared state that channel tools need to act on the channel.
 ///
 /// Wrapped in Arc and passed to tools (branch, spawn_worker, route, cancel)
@@ -2954,11 +3003,26 @@ impl Channel {
                     } else {
                         conclusion.clone()
                     };
+                    let (event_type, event_summary) = classify_conversational_event_summary(
+                        &summary,
+                        crate::memory::WorkingMemoryEventType::BranchCompleted,
+                    );
                     self.deps
                         .working_memory
                         .emit(
-                            crate::memory::WorkingMemoryEventType::BranchCompleted,
-                            format!("Branch concluded: {summary}"),
+                            event_type,
+                            match event_type {
+                                crate::memory::WorkingMemoryEventType::Outcome => {
+                                    format!("Branch outcome: {event_summary}")
+                                }
+                                crate::memory::WorkingMemoryEventType::BlockedOn => {
+                                    format!("Branch blocked on: {event_summary}")
+                                }
+                                crate::memory::WorkingMemoryEventType::Constraint => {
+                                    format!("Branch constraint: {event_summary}")
+                                }
+                                _ => format!("Branch concluded: {event_summary}"),
+                            },
                         )
                         .channel(self.id.to_string())
                         .importance(0.7)
@@ -3027,19 +3091,31 @@ impl Channel {
                 } else {
                     result.clone()
                 };
-                let event_type = if *success {
+                let default_event_type = if *success {
                     crate::memory::WorkingMemoryEventType::WorkerCompleted
                 } else {
                     crate::memory::WorkingMemoryEventType::Error
                 };
+                let (event_type, event_summary) =
+                    classify_conversational_event_summary(&worker_summary, default_event_type);
                 self.deps
                     .working_memory
                     .emit(
                         event_type,
-                        if *success {
-                            format!("Worker completed: {worker_summary}")
-                        } else {
-                            format!("Worker failed: {worker_summary}")
+                        match event_type {
+                            crate::memory::WorkingMemoryEventType::Outcome => {
+                                format!("Worker outcome: {event_summary}")
+                            }
+                            crate::memory::WorkingMemoryEventType::BlockedOn => {
+                                format!("Worker blocked on: {event_summary}")
+                            }
+                            crate::memory::WorkingMemoryEventType::Constraint => {
+                                format!("Worker constraint: {event_summary}")
+                            }
+                            crate::memory::WorkingMemoryEventType::Error => {
+                                format!("Worker failed: {event_summary}")
+                            }
+                            _ => format!("Worker completed: {event_summary}"),
                         },
                     )
                     .channel(self.id.to_string())
@@ -3617,11 +3693,12 @@ fn is_dm_conversation_id(conv_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        QuietModeFallbackState, compute_listen_mode_invocation, is_dm_conversation_id,
-        recv_channel_event, should_process_event_for_channel,
-        should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
+        QuietModeFallbackState, classify_conversational_event_summary,
+        compute_listen_mode_invocation, is_dm_conversation_id, recv_channel_event,
+        should_process_event_for_channel, should_send_discord_quiet_mode_ping_ack,
+        should_send_quiet_mode_fallback,
     };
-    use crate::memory::MemoryType;
+    use crate::memory::{MemoryType, WorkingMemoryEventType};
     use crate::{AgentId, ChannelId, InboundMessage, MessageContent, ProcessEvent, ProcessId};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -3788,6 +3865,36 @@ mod tests {
         };
 
         assert!(!should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn conversational_event_summary_extracts_outcome_prefix() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "outcome: implemented the migration safety check",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::Outcome);
+        assert_eq!(summary, "implemented the migration safety check");
+    }
+
+    #[test]
+    fn conversational_event_summary_extracts_blocked_on_prefix() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "blocked_on: waiting for review from infra",
+            WorkingMemoryEventType::Error,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::BlockedOn);
+        assert_eq!(summary, "waiting for review from infra");
+    }
+
+    #[test]
+    fn conversational_event_summary_falls_back_to_default_type() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "completed with no blockers",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::WorkerCompleted);
+        assert_eq!(summary, "completed with no blockers");
     }
 
     #[test]
