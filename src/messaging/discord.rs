@@ -602,9 +602,27 @@ impl EventHandler for Handler {
     }
 
     async fn message(&self, ctx: Context, message: Message) {
+        let mut is_cross_agent = false;
+        let mut cross_agent_source: Option<String> = None;
+        for embed in &message.embeds {
+            if let Some(ref footer) = embed.footer {
+                if footer.text.starts_with("cross-agent:") {
+                    is_cross_agent = true;
+                    cross_agent_source = Some(
+                        footer
+                            .text
+                            .strip_prefix("cross-agent:")
+                            .unwrap_or(&footer.text)
+                            .to_string(),
+                    );
+                    break;
+                }
+            }
+        }
+
         // Always ignore our own messages to prevent self-response loops
         let bot_user_id = *self.bot_user_id_slot.read().await;
-        if bot_user_id.is_some_and(|id| message.author.id == id) {
+        if bot_user_id.is_some_and(|id| message.author.id == id) && !is_cross_agent {
             return;
         }
 
@@ -635,7 +653,11 @@ impl EventHandler for Handler {
 
         let conversation_id = build_conversation_id(&self.runtime_key, &message);
         let content = extract_content(&message);
-        let (metadata, formatted_author) = build_metadata(&ctx, &message, bot_user_id).await;
+        let (mut metadata, formatted_author) = build_metadata(&ctx, &message, bot_user_id).await;
+
+        if let Some(source) = cross_agent_source {
+            metadata.insert("cross_agent_source".into(), source.into());
+        }
 
         // Channel filter: allow if the channel ID or its parent (for threads) is in the allowlist
         if let Some(guild_id) = message.guild_id

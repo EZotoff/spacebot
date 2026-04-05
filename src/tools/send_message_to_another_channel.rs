@@ -208,7 +208,11 @@ impl Tool for SendMessageTool {
                 .broadcast(
                     &target.adapter,
                     &target.target,
-                    crate::OutboundResponse::Text(args.message),
+                    build_cross_agent_outbound_response(
+                        &target.adapter,
+                        &args.message,
+                        &self.agent_display_name,
+                    ),
                 )
                 .await
                 .map_err(|error| SendMessageError(format!("failed to send message: {error}")))?;
@@ -258,7 +262,11 @@ impl Tool for SendMessageTool {
                             .broadcast(
                                 &target.adapter,
                                 &target.target,
-                                crate::OutboundResponse::Text(args.message),
+                                build_cross_agent_outbound_response(
+                                    &target.adapter,
+                                    &args.message,
+                                    &self.agent_display_name,
+                                ),
                             )
                             .await
                             .map_err(|error| {
@@ -293,7 +301,11 @@ impl Tool for SendMessageTool {
                 .broadcast(
                     &explicit_target.adapter,
                     &explicit_target.target,
-                    crate::OutboundResponse::Text(args.message),
+                    build_cross_agent_outbound_response(
+                        &explicit_target.adapter,
+                        &args.message,
+                        &self.agent_display_name,
+                    ),
                 )
                 .await
                 .map_err(|error| SendMessageError(format!("failed to send message: {error}")))?;
@@ -345,7 +357,11 @@ impl Tool for SendMessageTool {
             .broadcast(
                 &broadcast_target.adapter,
                 &broadcast_target.target,
-                crate::OutboundResponse::Text(args.message.clone()),
+                build_cross_agent_outbound_response(
+                    &broadcast_target.adapter,
+                    &args.message,
+                    &self.agent_display_name,
+                ),
             )
             .await
             .map_err(|error| SendMessageError(format!("failed to send message: {error}")))?;
@@ -372,6 +388,29 @@ impl Tool for SendMessageTool {
             target: channel.display_name.unwrap_or_else(|| channel.id.clone()),
             platform: broadcast_target.adapter,
         })
+    }
+}
+
+fn build_cross_agent_outbound_response(
+    adapter: &str,
+    message: &str,
+    agent_display_name: &str,
+) -> crate::OutboundResponse {
+    if adapter == "discord" || adapter.starts_with("discord:") {
+        crate::OutboundResponse::RichMessage {
+            text: message.to_string(),
+            blocks: Vec::new(),
+            cards: vec![crate::Card {
+                footer: Some(crate::CardFooter::new(format!(
+                    "cross-agent:{agent_display_name}"
+                ))),
+                ..Default::default()
+            }],
+            interactive_elements: Vec::new(),
+            poll: None,
+        }
+    } else {
+        crate::OutboundResponse::Text(message.to_string())
     }
 }
 

@@ -1,27 +1,55 @@
 //! Memory recall tool for branches.
 
 use crate::error::Result;
+use crate::links::LinkDirection;
 use crate::memory::MemorySearch;
 use crate::memory::search::{SearchConfig, SearchMode, SearchSort, curate_results};
 use crate::memory::types::Memory;
 
+use arc_swap::ArcSwap;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
 use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+struct CrossAgentMemoryAccess {
+    registry: Arc<ArcSwap<HashMap<String, Arc<MemorySearch>>>>,
+    links: Arc<ArcSwap<Vec<crate::links::AgentLink>>>,
+    agent_id: String,
+}
 
 /// Tool for recalling memories using hybrid search.
 #[derive(Debug, Clone)]
 pub struct MemoryRecallTool {
     memory_search: Arc<MemorySearch>,
+    cross_agent: Option<CrossAgentMemoryAccess>,
 }
 
 impl MemoryRecallTool {
     /// Create a new memory recall tool.
     pub fn new(memory_search: Arc<MemorySearch>) -> Self {
-        Self { memory_search }
+        Self {
+            memory_search,
+            cross_agent: None,
+        }
+    }
+
+    pub fn with_cross_agent(
+        mut self,
+        registry: Arc<ArcSwap<HashMap<String, Arc<MemorySearch>>>>,
+        links: Arc<ArcSwap<Vec<crate::links::AgentLink>>>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        self.cross_agent = Some(CrossAgentMemoryAccess {
+            registry,
+            links,
+            agent_id: agent_id.into(),
+        });
+        self
     }
 }
 
@@ -53,6 +81,8 @@ pub struct MemoryRecallArgs {
     /// Sort order for non-hybrid modes: "recent" (default), "importance", "most_accessed".
     #[serde(default)]
     pub sort_by: Option<String>,
+    #[serde(default)]
+    pub target_agent_id: Option<String>,
 }
 
 fn default_max_results() -> usize {
@@ -176,6 +206,10 @@ impl Tool for MemoryRecallTool {
                         "enum": ["recent", "importance", "most_accessed"],
                         "default": "recent",
                         "description": "Sort order for non-hybrid modes. Default: recent."
+                    },
+                    "target_agent_id": {
+                        "type": "string",
+                        "description": "Optional linked agent ID to search instead of local memory. Requires an active link with read permission in this direction."
                     }
                 }
             }),
@@ -221,19 +255,57 @@ impl Tool for MemoryRecallTool {
         };
 
         let query = args.query.as_deref().unwrap_or("");
-        let search_results = self
-            .memory_search
+
+        let mut search = Arc::clone(&self.memory_search);
+        let mut is_remote_search = false;
+
+        if let Some(target_agent_id) = args.target_agent_id.as_deref()
+            && let Some(cross_agent) = &self.cross_agent
+            && target_agent_id != cross_agent.agent_id
+        {
+            let links = cross_agent.links.load();
+            let link = crate::links::find_link_between(&links, &cross_agent.agent_id, target_agent_id)
+                .ok_or_else(|| {
+                    MemoryRecallError(format!(
+                        "no communication link exists between '{}' and '{}'.",
+                        cross_agent.agent_id, target_agent_id
+                    ))
+                })?;
+
+            let target_is_link_to = link.to_agent_id == cross_agent.agent_id;
+            if link.direction == LinkDirection::OneWay && target_is_link_to {
+                return Err(MemoryRecallError(format!(
+                    "link to '{}' is one-way and does not allow memory reads in this direction.",
+                    target_agent_id
+                )));
+            }
+
+            let registry = cross_agent.registry.load();
+            let remote = registry.get(target_agent_id).cloned().ok_or_else(|| {
+                MemoryRecallError(format!(
+                    "agent '{}' memory store is not available.",
+                    target_agent_id
+                ))
+            })?;
+
+            search = remote;
+            is_remote_search = true;
+        }
+
+        let search_results = search
             .search(query, &config)
             .await
             .map_err(|e| MemoryRecallError(format!("Search failed: {e}")))?;
 
         let curated = curate_results(&search_results, args.max_results);
 
-        let store = self.memory_search.store();
+        let store = search.store();
         let mut memories = Vec::new();
 
         for result in &curated {
-            if let Err(error) = store.record_access(&result.memory.id).await {
+            if !is_remote_search
+                && let Err(error) = store.record_access(&result.memory.id).await
+            {
                 tracing::warn!(
                     memory_id = %result.memory.id,
                     %error,
@@ -312,6 +384,7 @@ pub async fn memory_recall(
         memory_type: None,
         mode: None,
         sort_by: None,
+        target_agent_id: None,
     };
 
     let output = tool

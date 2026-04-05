@@ -176,9 +176,11 @@ use crate::conversation::settings::WorkerMemoryMode;
 use crate::memory::MemorySearch;
 use crate::sandbox::Sandbox;
 use crate::tasks::TaskStore;
+use arc_swap::ArcSwap;
 use crate::{AgentId, ChannelId, ProcessEvent, RoutedSender, WorkerId};
 use rig::tool::Tool as _;
 use rig::tool::server::{ToolServer, ToolServerHandle};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -575,6 +577,8 @@ pub fn create_branch_tool_server(
     agent_id: AgentId,
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
+    links: Option<Arc<ArcSwap<Vec<crate::links::AgentLink>>>>,
+    memory_search_registry: Option<Arc<ArcSwap<HashMap<String, Arc<MemorySearch>>>>>,
     runtime_config: Arc<RuntimeConfig>,
     memory_event_tx: broadcast::Sender<ProcessEvent>,
     conversation_logger: crate::conversation::history::ConversationLogger,
@@ -592,9 +596,15 @@ pub fn create_branch_tool_server(
         memory_save = memory_save.with_contract_state(contract_state.clone());
     }
 
+    let mut memory_recall = MemoryRecallTool::new(memory_search.clone());
+    if let (Some(links), Some(memory_search_registry)) = (links, memory_search_registry) {
+        memory_recall =
+            memory_recall.with_cross_agent(memory_search_registry, links, agent_id.to_string());
+    }
+
     let mut server = ToolServer::new()
         .tool(memory_save)
-        .tool(MemoryRecallTool::new(memory_search.clone()))
+        .tool(memory_recall)
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(SpacebotDocsTool::new())
@@ -739,6 +749,8 @@ pub fn create_cortex_chat_tool_server(
     deps: crate::AgentDeps,
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
+    links: Option<Arc<ArcSwap<Vec<crate::links::AgentLink>>>>,
+    memory_search_registry: Option<Arc<ArcSwap<HashMap<String, Arc<MemorySearch>>>>>,
     memory_event_tx: broadcast::Sender<ProcessEvent>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
@@ -753,6 +765,12 @@ pub fn create_cortex_chat_tool_server(
     cortex_ctx: Option<crate::tools::spawn_worker::CortexChatContext>,
 ) -> ToolServerHandle {
     let logs_dir = workspace.join(".spacebot").join("logs");
+
+    let mut memory_recall = MemoryRecallTool::new(memory_search.clone());
+    if let (Some(links), Some(memory_search_registry)) = (links, memory_search_registry) {
+        memory_recall =
+            memory_recall.with_cross_agent(memory_search_registry, links, agent_id.to_string());
+    }
 
     let spawn_tool = {
         let tool = DetachedSpawnWorkerTool::new(deps, screenshot_dir.clone(), logs_dir);
@@ -769,7 +787,7 @@ pub fn create_cortex_chat_tool_server(
             memory_event_tx,
             None,
         ))
-        .tool(MemoryRecallTool::new(memory_search.clone()))
+        .tool(memory_recall)
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(SpacebotDocsTool::new())

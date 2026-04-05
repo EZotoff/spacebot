@@ -396,6 +396,7 @@ pub struct ChannelInjection {
 pub struct AgentDeps {
     pub agent_id: AgentId,
     pub memory_search: Arc<memory::MemorySearch>,
+    pub memory_search_registry: Arc<arc_swap::ArcSwap<HashMap<String, Arc<memory::MemorySearch>>>>,
     pub llm_manager: Arc<llm::LlmManager>,
     pub mcp_manager: Arc<mcp::McpManager>,
     pub task_store: Arc<tasks::TaskStore>,
@@ -425,6 +426,13 @@ impl AgentDeps {
     pub fn memory_search(&self) -> &Arc<memory::MemorySearch> {
         &self.memory_search
     }
+
+    pub fn memory_search_registry(
+        &self,
+    ) -> arc_swap::Guard<Arc<HashMap<String, Arc<memory::MemorySearch>>>> {
+        self.memory_search_registry.load()
+    }
+
     pub fn llm_manager(&self) -> &Arc<llm::LlmManager> {
         &self.llm_manager
     }

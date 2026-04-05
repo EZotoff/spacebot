@@ -496,6 +496,8 @@ async fn process_chunk(
         deps.agent_id.clone(),
         deps.task_store.clone(),
         deps.memory_search.clone(),
+        Some(deps.links.clone()),
+        Some(deps.memory_search_registry.clone()),
         deps.runtime_config.clone(),
         deps.memory_event_tx.clone(),
         conversation_logger,

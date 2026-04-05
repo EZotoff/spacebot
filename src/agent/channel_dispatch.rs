@@ -284,6 +284,8 @@ async fn spawn_branch(
         state.deps.agent_id.clone(),
         state.deps.task_store.clone(),
         state.deps.memory_search.clone(),
+        Some(state.deps.links.clone()),
+        Some(state.deps.memory_search_registry.clone()),
         state.deps.runtime_config.clone(),
         state.deps.memory_event_tx.clone(),
         state.conversation_logger.clone(),

@@ -467,6 +467,16 @@ pub(super) async fn trigger_warmup(
         let agent_id = agent_id.clone();
         let injection_tx = state.injection_tx.clone();
         let humans = (**state.agent_humans.load()).clone();
+        let memory_search_registry = {
+            let existing = state.memory_searches.load();
+            let mut registry = std::collections::HashMap::new();
+            for (existing_agent_id, search) in existing.iter() {
+                if existing_agent_id != &agent_id {
+                    registry.insert(existing_agent_id.clone(), search.clone());
+                }
+            }
+            Arc::new(arc_swap::ArcSwap::from_pointee(registry))
+        };
         tokio::spawn(async move {
             let (event_tx, memory_event_tx) = crate::create_process_event_buses();
             let project_store =
@@ -483,6 +493,7 @@ pub(super) async fn trigger_warmup(
             let deps = crate::AgentDeps {
                 agent_id: Arc::from(agent_id.as_str()),
                 memory_search,
+                memory_search_registry,
                 llm_manager,
                 mcp_manager,
                 cron_tool: None,
@@ -872,6 +883,16 @@ pub async fn create_agent_internal(
     let deps = crate::AgentDeps {
         agent_id: arc_agent_id.clone(),
         memory_search: memory_search.clone(),
+        memory_search_registry: {
+            let existing = state.memory_searches.load();
+            let mut registry = std::collections::HashMap::new();
+            for (existing_agent_id, search) in existing.iter() {
+                if existing_agent_id != &agent_id {
+                    registry.insert(existing_agent_id.clone(), search.clone());
+                }
+            }
+            Arc::new(arc_swap::ArcSwap::from_pointee(registry))
+        },
         llm_manager,
         mcp_manager: mcp_manager.clone(),
         task_store: task_store.clone(),
@@ -953,6 +974,8 @@ pub async fn create_agent_internal(
         deps.clone(),
         deps.task_store.clone(),
         memory_search.clone(),
+        Some(deps.links.clone()),
+        Some(deps.memory_search_registry.clone()),
         deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,

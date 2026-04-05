@@ -299,6 +299,23 @@ fn render_conversation_history_backfill(
     serialize_backfill_transcript(entries)
 }
 
+fn rebuild_memory_search_registries(agents: &mut HashMap<spacebot::AgentId, spacebot::Agent>) {
+    let all_searches: HashMap<String, Arc<spacebot::memory::MemorySearch>> = agents
+        .iter()
+        .map(|(agent_id, agent)| (agent_id.to_string(), agent.deps.memory_search.clone()))
+        .collect();
+
+    for (agent_id, agent) in agents.iter_mut() {
+        let mut registry = HashMap::new();
+        for (other_agent_id, memory_search) in &all_searches {
+            if other_agent_id != agent_id.as_ref() {
+                registry.insert(other_agent_id.clone(), memory_search.clone());
+            }
+        }
+        agent.deps.memory_search_registry.store(Arc::new(registry));
+    }
+}
+
 /// Forward outbound response events to SSE clients for the dashboard.
 fn forward_sse_event(
     api_event_tx: &tokio::sync::broadcast::Sender<spacebot::api::ApiEvent>,
@@ -2465,11 +2482,13 @@ async fn run(
             Some(agent) = agent_rx.recv() => {
                 tracing::info!(agent_id = %agent.id, "registering new agent in main loop");
                 agents.insert(agent.id.clone(), agent);
+                rebuild_memory_search_registries(&mut agents);
             }
             Some(agent_id) = agent_remove_rx.recv() => {
                 let key: spacebot::AgentId = Arc::from(agent_id.as_str());
                 if let Some(agent) = agents.remove(&key) {
                     agent.deps.mcp_manager.disconnect_all().await;
+                    rebuild_memory_search_registries(&mut agents);
                     tracing::info!(agent_id = %agent_id, "removed agent from main loop");
                 } else {
                     tracing::warn!(agent_id = %agent_id, "agent not found in main loop for removal");
@@ -2948,6 +2967,7 @@ async fn initialize_agents(
         let deps = spacebot::AgentDeps {
             agent_id: agent_id.clone(),
             memory_search,
+            memory_search_registry: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             llm_manager: llm_manager.clone(),
             mcp_manager,
             task_store: global_task_store.clone(),
@@ -3006,6 +3026,7 @@ async fn initialize_agents(
     }
 
     tracing::info!(agent_count = agents.len(), "all agents initialized");
+    rebuild_memory_search_registries(agents);
 
     // Record startup in each agent's working memory.
     for agent in agents.values() {
@@ -3731,6 +3752,8 @@ async fn initialize_agents(
                 agent.deps.clone(),
                 agent.deps.task_store.clone(),
                 agent.deps.memory_search.clone(),
+                Some(agent.deps.links.clone()),
+                Some(agent.deps.memory_search_registry.clone()),
                 agent.deps.memory_event_tx.clone(),
                 conversation_logger,
                 channel_store,
