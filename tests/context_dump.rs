@@ -108,6 +108,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     let deps = spacebot::AgentDeps {
         agent_id,
         memory_search,
+        memory_search_registry: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
         llm_manager,
         mcp_manager,
         task_store,
@@ -187,7 +188,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
         .expect("failed to render worker capabilities");
 
     let conversation_context = prompt_engine
-        .render_conversation_context("discord", Some("Test Server"), Some("#general"), None)
+        .render_conversation_context("discord", Some("Test Server"), Some("#general"), None, None)
         .ok();
 
     let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
@@ -326,6 +327,8 @@ async fn dump_branch_context() {
         deps.agent_id.clone(),
         deps.task_store.clone(),
         deps.memory_search.clone(),
+        None,
+        None,
         deps.runtime_config.clone(),
         deps.memory_event_tx.clone(),
         conversation_logger,
@@ -538,6 +541,8 @@ async fn dump_all_contexts() {
         deps.agent_id.clone(),
         deps.task_store.clone(),
         deps.memory_search.clone(),
+        None,
+        None,
         deps.runtime_config.clone(),
         deps.memory_event_tx.clone(),
         conversation_logger,

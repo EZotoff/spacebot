@@ -226,7 +226,7 @@ impl Tool for FileReadTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = self.context.resolve_writable_path(&args.path)?;
+        let path = self.context.resolve_path(&args.path)?;
 
         let raw = tokio::fs::read_to_string(&path)
             .await
@@ -418,7 +418,7 @@ impl Tool for FileEditTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = self.context.resolve_path(&args.path)?;
+        let path = self.context.resolve_writable_path(&args.path)?;
 
         let original = tokio::fs::read_to_string(&path)
             .await

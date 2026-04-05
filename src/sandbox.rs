@@ -293,6 +293,11 @@ impl Sandbox {
     /// Used by shell/file tools to relax the workspace boundary when
     /// project paths are registered.
     pub fn is_path_allowed(&self, canonical: &Path) -> bool {
+        // Always deny access to the agent's data directory
+        if canonical.starts_with(&self.data_dir) {
+            return false;
+        }
+        
         let workspace_canonical = self
             .workspace
             .canonicalize()
@@ -909,7 +914,8 @@ impl Sandbox {
         for (index, path) in config.readable_paths.iter().enumerate() {
             let canonical = canonicalize_or_self(path);
             profile.push_str(&format!(
-                "; readable path {index}\n(allow file-read* (subpath \"{}\"))\n",
+                "; readable path {index}\n(allow file-read* (subpath \"{}\"))\n(deny file-write* (subpath \"{}\"))\n",
+                escape_sbpl_path(&canonical),
                 escape_sbpl_path(&canonical)
             ));
         }

@@ -109,6 +109,7 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
     Ok(spacebot::AgentDeps {
         agent_id,
         memory_search,
+        memory_search_registry: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
         llm_manager,
         mcp_manager,
         task_store,
