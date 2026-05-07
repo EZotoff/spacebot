@@ -1,0 +1,9 @@
+id = "bim-overseer"
+name = "BIM Overseer"
+description = "Experiment orchestration agent for the multimodal RAG-BIM classification project. Spawns autoresearch workers, manages ARA artifact capture, records Decision memories, and coordinates the HyperBand experiment pipeline."
+icon = "flask"
+tags = ["bim", "research", "orchestration", "experiments", "ara", "provenance"]
+
+[defaults]
+max_concurrent_workers = 5
+max_turns = 8

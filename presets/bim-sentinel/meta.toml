@@ -1,0 +1,9 @@
+id = "bim-sentinel"
+name = "BIM Sentinel"
+description = "Read-only information officer for the BIM RAG classification project. Answers TTO and stakeholder questions about IP decisions, human attributions, experiment progress, and project configuration."
+icon = "eye"
+tags = ["bim", "information", "tto", "read-only", "audit", "compliance"]
+
+[defaults]
+max_concurrent_workers = 0
+max_turns = 8
