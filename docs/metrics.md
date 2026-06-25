@@ -19,14 +19,14 @@ The Docker image always includes metrics — `--features metrics` is hardcoded i
 ```toml
 [metrics]
 enabled = true
-port = 9090
+port = 18012
 bind = "0.0.0.0"
 ```
 
 | Key       | Default     | Description                          |
 | --------- | ----------- | ------------------------------------ |
 | `enabled` | `false`     | Enable the /metrics HTTP endpoint    |
-| `port`    | `9090`      | Port for the metrics server          |
+| `port`    | `18012`      | Port for the metrics server          |
 | `bind`    | `"0.0.0.0"` | Address to bind the metrics server  |
 
 The metrics server runs as a separate tokio task alongside the main API server. It shuts down gracefully with the rest of the process.
@@ -190,7 +190,7 @@ scrape_configs:
   - job_name: spacebot
     scrape_interval: 15s
     static_configs:
-      - targets: ["localhost:9090"]
+      - targets: ["localhost:18012"]
 ```
 
 ## Docker
@@ -203,7 +203,7 @@ docker run -d \
   -e ANTHROPIC_API_KEY="sk-ant-..." \
   -v spacebot-data:/data \
   -p 19898:19898 \
-  -p 9090:9090 \
+  -p 18012:18012 \
   ghcr.io/spacedriveapp/spacebot:latest
 ```
 

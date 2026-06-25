@@ -6,11 +6,13 @@ use crate::{AgentId, ChannelId, ProcessEvent, ProcessId, ProcessType};
 use futures::StreamExt;
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::{
-    CompletionModel, CompletionResponse, GetTokenUsage, Message, Prompt, PromptError,
+    CompletionError, CompletionModel, CompletionResponse, GetTokenUsage, Message, Prompt,
+    PromptError,
 };
 use rig::message::{AssistantContent, ToolResultContent, UserContent};
 use rig::streaming::{StreamedAssistantContent, StreamingCompletion};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 /// Controls whether hook-driven tool nudge retries are enabled.
@@ -93,12 +95,21 @@ impl SpacebotHook {
     pub const TOOL_NUDGE_MAX_RETRIES: usize = 2;
     /// Maximum completion-contract retries per prompt request.
     pub const MEMORY_PERSISTENCE_CONTRACT_MAX_RETRIES: usize = 2;
+    /// Maximum wall-clock time allowed for one LLM prompt call.
+    pub const LLM_CALL_TIMEOUT_SECS: u64 = 300;
     /// Prompt used to nudge memory-persistence branches toward a terminal tool outcome.
     pub const MEMORY_PERSISTENCE_CONTRACT_PROMPT: &str = "You must finish this memory-persistence run by calling memory_persistence_complete. \
          First recall relevant memories, then save real memories if needed, then call \
          memory_persistence_complete with either outcome=\"saved\" and exact saved_memory_ids \
          from successful memory_save calls in this run, or outcome=\"no_memories\" with a short \
          reason and no saved IDs. Do not invent memory IDs.";
+
+    fn llm_call_timeout_error() -> PromptError {
+        PromptError::CompletionError(CompletionError::ResponseError(format!(
+            "LLM call timed out after {}s",
+            Self::LLM_CALL_TIMEOUT_SECS
+        )))
+    }
 
     /// Create a new hook.
     pub fn new(
@@ -282,11 +293,15 @@ impl SpacebotHook {
 
         loop {
             let history_len_before_attempt = history.len();
-            let result = agent
-                .prompt(current_prompt.as_ref())
-                .with_history(history)
-                .with_hook(self.clone())
-                .await;
+            let result = tokio::time::timeout(
+                Duration::from_secs(Self::LLM_CALL_TIMEOUT_SECS),
+                agent
+                    .prompt(current_prompt.as_ref())
+                    .with_history(history)
+                    .with_hook(self.clone()),
+            )
+            .await
+            .map_err(|_| Self::llm_call_timeout_error())?;
 
             match &result {
                 // Context injection: the hook detected pending injected
@@ -435,11 +450,15 @@ impl SpacebotHook {
     {
         self.reset_tool_nudge_state();
         self.set_tool_nudge_request_active(false);
-        agent
-            .prompt(prompt)
-            .with_history(history)
-            .with_hook(self.clone())
-            .await
+        tokio::time::timeout(
+            Duration::from_secs(Self::LLM_CALL_TIMEOUT_SECS),
+            agent
+                .prompt(prompt)
+                .with_history(history)
+                .with_hook(self.clone()),
+        )
+        .await
+        .map_err(|_| Self::llm_call_timeout_error())?
     }
 
     /// Prompt once using Rig's streaming path so text/tool deltas reach the hook.
@@ -495,24 +514,36 @@ impl SpacebotHook {
                 });
             }
 
-            let request = agent
-                .stream_completion(
+            let request = tokio::time::timeout(
+                Duration::from_secs(Self::LLM_CALL_TIMEOUT_SECS),
+                agent.stream_completion(
                     current_prompt.clone(),
                     chat_history[..chat_history.len() - 1].to_vec(),
-                )
-                .await
-                .map_err(PromptError::CompletionError)?;
+                ),
+            )
+            .await
+            .map_err(|_| Self::llm_call_timeout_error())?
+            .map_err(PromptError::CompletionError)?;
 
-            let mut stream = request
-                .stream()
-                .await
-                .map_err(PromptError::CompletionError)?;
+            let mut stream = tokio::time::timeout(
+                Duration::from_secs(Self::LLM_CALL_TIMEOUT_SECS),
+                request.stream(),
+            )
+            .await
+            .map_err(|_| Self::llm_call_timeout_error())?
+            .map_err(PromptError::CompletionError)?;
 
             let mut tool_calls = vec![];
             let mut tool_results = vec![];
             let mut is_text_response = false;
 
-            while let Some(content) = stream.next().await {
+            while let Some(content) = tokio::time::timeout(
+                Duration::from_secs(Self::LLM_CALL_TIMEOUT_SECS),
+                stream.next(),
+            )
+            .await
+            .map_err(|_| Self::llm_call_timeout_error())?
+            {
                 match content.map_err(PromptError::CompletionError)? {
                     StreamedAssistantContent::Text(text) => {
                         if !is_text_response {

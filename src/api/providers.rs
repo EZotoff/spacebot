@@ -20,6 +20,7 @@ const OPENAI_DEVICE_OAUTH_SESSION_TTL_SECS: i64 = 30 * 60;
 const OPENAI_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
 const OPENAI_DEVICE_OAUTH_SLOWDOWN_SECS: u64 = 5;
 const OPENAI_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS: u64 = 30;
+const PROVIDER_MODEL_TEST_TIMEOUT_SECS: u64 = 60;
 
 static OPENAI_DEVICE_OAUTH_SESSIONS: LazyLock<RwLock<HashMap<String, DeviceOAuthSession>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -1405,15 +1406,27 @@ pub(super) async fn test_provider_model(
             .preamble("You are running a provider connectivity check. Reply with exactly: OK")
             .build();
 
-        return match agent.prompt("Connection test").await {
-            Ok(sample) => Ok(Json(ProviderModelTestResponse {
+        return match tokio::time::timeout(
+            Duration::from_secs(PROVIDER_MODEL_TEST_TIMEOUT_SECS),
+            agent.prompt("Connection test"),
+        )
+        .await
+        {
+            Err(_) => Ok(Json(ProviderModelTestResponse {
+                success: false,
+                message: format!("Model test timed out after {PROVIDER_MODEL_TEST_TIMEOUT_SECS}s"),
+                provider: request.provider,
+                model: request.model,
+                sample: None,
+            })),
+            Ok(Ok(sample)) => Ok(Json(ProviderModelTestResponse {
                 success: true,
                 message: "Model responded successfully".to_string(),
                 provider: request.provider,
                 model: request.model,
                 sample: Some(sample),
             })),
-            Err(error) => Ok(Json(ProviderModelTestResponse {
+            Ok(Err(error)) => Ok(Json(ProviderModelTestResponse {
                 success: false,
                 message: format!("Model test failed: {error}"),
                 provider: request.provider,
@@ -1442,15 +1455,27 @@ pub(super) async fn test_provider_model(
         .preamble("You are running a provider connectivity check. Reply with exactly: OK")
         .build();
 
-    match agent.prompt("Connection test").await {
-        Ok(sample) => Ok(Json(ProviderModelTestResponse {
+    match tokio::time::timeout(
+        Duration::from_secs(PROVIDER_MODEL_TEST_TIMEOUT_SECS),
+        agent.prompt("Connection test"),
+    )
+    .await
+    {
+        Err(_) => Ok(Json(ProviderModelTestResponse {
+            success: false,
+            message: format!("Model test timed out after {PROVIDER_MODEL_TEST_TIMEOUT_SECS}s"),
+            provider: request.provider,
+            model: request.model,
+            sample: None,
+        })),
+        Ok(Ok(sample)) => Ok(Json(ProviderModelTestResponse {
             success: true,
             message: "Model responded successfully".to_string(),
             provider: request.provider,
             model: request.model,
             sample: Some(sample),
         })),
-        Err(error) => Ok(Json(ProviderModelTestResponse {
+        Ok(Err(error)) => Ok(Json(ProviderModelTestResponse {
             success: false,
             message: format!("Model test failed: {error}"),
             provider: request.provider,

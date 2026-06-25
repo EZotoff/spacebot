@@ -19,7 +19,7 @@ use tokio::process::Command;
 
 /// Port sshd listens on. Uses 2222 to avoid conflicts with other services
 /// that may occupy port 22 in containerized environments.
-const SSHD_PORT: u16 = 2222;
+const SSHD_PORT: u16 = 18013;
 
 /// Host key algorithms to generate if missing.
 const HOST_KEY_TYPES: &[&str] = &["rsa", "ecdsa", "ed25519"];

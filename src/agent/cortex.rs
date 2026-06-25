@@ -93,6 +93,7 @@ const MAINTENANCE_TASK_TIMEOUT_MIN_SECS: u64 = 300;
 const MAINTENANCE_TASK_TIMEOUT_MAX_SECS: u64 = 3_600;
 const MAINTENANCE_TASK_TIMEOUT_MULTIPLIER: u64 = 6;
 const MAINTENANCE_TASK_CANCEL_GRACE_SECS: u64 = 30;
+const CORTEX_LLM_CALL_TIMEOUT_SECS: u64 = 300;
 
 fn bulletin_refresh_failure_backoff(consecutive_failures: u32) -> Duration {
     let exponent = consecutive_failures.saturating_sub(1).min(5);
@@ -354,6 +355,7 @@ struct BranchTracker {
     branch_id: BranchId,
     channel_id: ChannelId,
     started_at: Instant,
+    last_activity_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -435,14 +437,22 @@ impl HealthRuntimeState {
     }
 
     fn track_branch_start(&mut self, branch_id: BranchId, channel_id: ChannelId) {
+        let now = Instant::now();
         self.branch_trackers.insert(
             branch_id,
             BranchTracker {
                 branch_id,
                 channel_id,
-                started_at: Instant::now(),
+                started_at: now,
+                last_activity_at: now,
             },
         );
+    }
+
+    fn track_branch_activity(&mut self, branch_id: BranchId) {
+        if let Some(tracker) = self.branch_trackers.get_mut(&branch_id) {
+            tracker.last_activity_at = Instant::now();
+        }
     }
 
     fn track_branch_complete(&mut self, branch_id: BranchId) {
@@ -507,7 +517,7 @@ fn parse_structured_success_flag(result: &str) -> Option<bool> {
 fn kill_target_last_activity(target: &KillTarget) -> Instant {
     match target {
         KillTarget::Worker(tracker) => tracker.last_activity_at,
-        KillTarget::Branch(tracker) => tracker.started_at,
+        KillTarget::Branch(tracker) => tracker.last_activity_at,
     }
 }
 
@@ -942,14 +952,22 @@ impl Cortex {
             } => {
                 state.track_worker_activity(*worker_id);
             }
+            ProcessEvent::ToolStarted {
+                process_id: ProcessId::Branch(branch_id),
+                ..
+            } => {
+                state.track_branch_activity(*branch_id);
+            }
             ProcessEvent::ToolCompleted {
                 process_id,
                 tool_name,
                 result,
                 ..
             } => {
-                if let ProcessId::Worker(worker_id) = process_id {
-                    state.track_worker_activity(*worker_id);
+                match process_id {
+                    ProcessId::Worker(worker_id) => state.track_worker_activity(*worker_id),
+                    ProcessId::Branch(branch_id) => state.track_branch_activity(*branch_id),
+                    ProcessId::Channel(_) => {}
                 }
                 state.track_tool_completed(tool_name, result, threshold);
             }
@@ -985,9 +1003,18 @@ impl Cortex {
             .await;
 
         let now = Instant::now();
-        let (lagged_control, pending_breaker_trips, overdue_workers, overdue_branches) = {
+        let (
+            lagged_control,
+            pending_breaker_trips,
+            overdue_workers,
+            overdue_branches,
+            active_workers,
+            active_branches,
+        ) = {
             let mut state = self.health_runtime_state.write().await;
             let lagged_control = take_lagged_control_flag(&mut state);
+            let active_workers = state.worker_trackers.len();
+            let active_branches = state.branch_trackers.len();
 
             let pending_breaker_trips = std::mem::take(&mut state.pending_breaker_trip_events);
 
@@ -1011,7 +1038,9 @@ impl Cortex {
                 state
                     .branch_trackers
                     .values()
-                    .filter(|tracker| now.duration_since(tracker.started_at) >= branch_timeout)
+                    .filter(|tracker| {
+                        now.duration_since(tracker.last_activity_at) >= branch_timeout
+                    })
                     .cloned()
                     .collect()
             };
@@ -1021,8 +1050,21 @@ impl Cortex {
                 pending_breaker_trips,
                 overdue_workers,
                 overdue_branches,
+                active_workers,
+                active_branches,
             )
         };
+
+        tracing::debug!(
+            lagged_control,
+            active_workers,
+            active_branches,
+            overdue_workers = overdue_workers.len(),
+            overdue_branches = overdue_branches.len(),
+            kill_budget,
+            pruned_dead_channels,
+            "cortex health tick"
+        );
 
         for trip in pending_breaker_trips {
             logger.log(
@@ -1044,6 +1086,8 @@ impl Cortex {
                 Some(serde_json::json!({
                     "kill_skipped_due_to_lag": true,
                     "kill_budget": kill_budget,
+                    "active_workers": active_workers,
+                    "active_branches": active_branches,
                     "pruned_dead_channels": pruned_dead_channels,
                 })),
             );
@@ -1151,6 +1195,8 @@ impl Cortex {
                 "kill_budget": kill_budget,
                 "kill_attempts": kill_attempts,
                 "kill_actions": kill_actions,
+                "active_workers": active_workers,
+                "active_branches": active_branches,
                 "worker_timeout_secs": worker_timeout.as_secs(),
                 "branch_timeout_secs": branch_timeout.as_secs(),
                 "pruned_dead_channels": pruned_dead_channels,
@@ -2443,8 +2489,36 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
         }
     };
 
-    match agent.prompt(&synthesis_prompt).await {
-        Ok(bulletin) => {
+    match tokio::time::timeout(
+        Duration::from_secs(CORTEX_LLM_CALL_TIMEOUT_SECS),
+        agent.prompt(&synthesis_prompt),
+    )
+    .await
+    {
+        Err(_) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            tracing::error!("cortex bulletin synthesis timed out, keeping previous bulletin");
+            update_warmup_status(deps, |status| {
+                status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
+                if status.state != crate::config::WarmupState::Warming {
+                    status.state = crate::config::WarmupState::Degraded;
+                    status.last_error = Some(format!(
+                        "bulletin generation timed out after {CORTEX_LLM_CALL_TIMEOUT_SECS}s"
+                    ));
+                }
+            });
+            logger.log(
+                "bulletin_failed",
+                &format!("Bulletin synthesis timed out after {duration_ms}ms"),
+                Some(serde_json::json!({
+                    "error": format!("timeout after {CORTEX_LLM_CALL_TIMEOUT_SECS}s"),
+                    "duration_ms": duration_ms,
+                    "model": model_name,
+                })),
+            );
+            false
+        }
+        Ok(Ok(bulletin)) => {
             let word_count = bulletin.split_whitespace().count();
             let duration_ms = started.elapsed().as_millis() as u64;
             tracing::info!(words = word_count, "cortex bulletin generated");
@@ -2472,7 +2546,7 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
             );
             true
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             let duration_ms = started.elapsed().as_millis() as u64;
             tracing::error!(%error, "cortex bulletin synthesis failed, keeping previous bulletin");
             let error_message = error.to_string();
@@ -2605,8 +2679,32 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
         }
     };
 
-    match agent.prompt(&user_prompt).await {
-        Ok(synthesis) => {
+    match tokio::time::timeout(
+        Duration::from_secs(CORTEX_LLM_CALL_TIMEOUT_SECS),
+        agent.prompt(&user_prompt),
+    )
+    .await
+    {
+        Err(_) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            tracing::error!(duration_ms, "knowledge synthesis timed out");
+            update_warmup_status(deps, |status| {
+                status.last_error = Some(format!(
+                    "knowledge synthesis timed out after {CORTEX_LLM_CALL_TIMEOUT_SECS}s"
+                ));
+            });
+            logger.log(
+                "knowledge_synthesis_failed",
+                &format!("Knowledge synthesis timed out after {duration_ms}ms"),
+                Some(serde_json::json!({
+                    "duration_ms": duration_ms,
+                    "error": format!("timeout after {CORTEX_LLM_CALL_TIMEOUT_SECS}s"),
+                    "model": model_name,
+                })),
+            );
+            false
+        }
+        Ok(Ok(synthesis)) => {
             let word_count = synthesis.split_whitespace().count();
             let duration_ms = started.elapsed().as_millis() as u64;
             tracing::info!(
@@ -2652,7 +2750,7 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
             );
             true
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             let duration_ms = started.elapsed().as_millis() as u64;
             tracing::error!(%error, duration_ms, "knowledge synthesis failed");
             update_warmup_status(deps, |status| {
@@ -2846,7 +2944,14 @@ pub async fn maybe_synthesize_intraday_batch(
         .hook(CortexHook::new())
         .build();
 
-    let synthesis = agent.prompt(&prompt).await?;
+    let synthesis = tokio::time::timeout(
+        Duration::from_secs(CORTEX_LLM_CALL_TIMEOUT_SECS),
+        agent.prompt(&prompt),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("intraday synthesis timed out after {CORTEX_LLM_CALL_TIMEOUT_SECS}s")
+    })??;
 
     // Store the synthesis.
     wm.save_intraday_synthesis(
@@ -2988,7 +3093,14 @@ pub async fn maybe_synthesize_daily_summary(
         .hook(CortexHook::new())
         .build();
 
-    let summary = agent.prompt(&prompt).await?;
+    let summary = tokio::time::timeout(
+        Duration::from_secs(CORTEX_LLM_CALL_TIMEOUT_SECS),
+        agent.prompt(&prompt),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("daily summary timed out after {CORTEX_LLM_CALL_TIMEOUT_SECS}s")
+    })??;
 
     wm.save_daily_summary(&yesterday, &summary, total_events)
         .await?;
@@ -5044,12 +5156,14 @@ mod tests {
                 .expect("valid uuid"),
             channel_id: Arc::from("channel-a"),
             started_at: older,
+            last_activity_at: older,
         };
         let branch_newest = BranchTracker {
             branch_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002")
                 .expect("valid uuid"),
             channel_id: Arc::from("channel-a"),
             started_at: newer,
+            last_activity_at: newer,
         };
 
         let targets = build_kill_targets(
@@ -5103,6 +5217,33 @@ mod tests {
         let mut state = HealthRuntimeState::default();
         // Should not panic on unknown worker ID.
         state.track_worker_activity(uuid::Uuid::new_v4());
+    }
+
+    #[test]
+    fn branch_activity_resets_idle_clock() {
+        let mut state = HealthRuntimeState::default();
+        let branch_id = uuid::Uuid::new_v4();
+        state.track_branch_start(branch_id, Arc::from("ch"));
+
+        let tracker_before = state.branch_trackers.get(&branch_id).unwrap().clone();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        state.track_branch_activity(branch_id);
+
+        let tracker_after = state.branch_trackers.get(&branch_id).unwrap();
+        assert!(
+            tracker_after.last_activity_at > tracker_before.last_activity_at,
+            "last_activity_at should advance after track_branch_activity"
+        );
+        assert_eq!(
+            tracker_after.started_at, tracker_before.started_at,
+            "started_at should not change"
+        );
+    }
+
+    #[test]
+    fn branch_activity_noop_for_unknown_branch() {
+        let mut state = HealthRuntimeState::default();
+        state.track_branch_activity(uuid::Uuid::new_v4());
     }
 
     #[test]

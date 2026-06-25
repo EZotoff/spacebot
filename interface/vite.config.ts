@@ -10,10 +10,10 @@ export default defineConfig({
 		},
 	},
 	server: {
-		port: 19840,
+		port: 18011,
 		proxy: {
 			"/api": {
-				target: "http://127.0.0.1:19898",
+				target: "http://127.0.0.1:18010",
 				changeOrigin: true,
 				// SSE: the default http-proxy timeout (2 min) kills long-lived
 				// event-stream connections.  Setting timeout to 0 disables it.

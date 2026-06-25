@@ -557,6 +557,21 @@ impl Sandbox {
         // 2. Writable /dev with standard nodes
         cmd.arg("--dev").arg("/dev");
 
+        // 2a. Bind-mount GPU device nodes into the sandbox. bwrap's --dev
+        // creates a minimal devtmpfs without vendor device files, so NVIDIA
+        // GPUs (and similar accelerators) are invisible to sandboxed workers.
+        // --dev-bind mounts the host device node at the same path, preserving
+        // major/minor numbers and character-device semantics.
+        if let Ok(entries) = std::fs::read_dir("/dev") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with("nvidia") {
+                    let path = entry.path();
+                    cmd.arg("--dev-bind").arg(&path).arg(&path);
+                }
+            }
+        }
+
         // 3. Fresh /proc (if supported by the environment)
         if proc_supported {
             cmd.arg("--proc").arg("/proc");
